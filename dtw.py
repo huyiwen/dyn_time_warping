@@ -4,29 +4,9 @@ from copy import deepcopy
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 from scipy import signal
-from tqdm import tqdm
+import numba as nb
 
-
-def squarewave(timevector = np.linspace(0,1,500), amp =1 , freq = 5,  phase = 0):
-    sine = np.sin(2*np.pi*freq*timevector + phase)
-    square = np.zeros(len(sine))
-    for i, val in np.ndenumerate(sine):
-        if val> 1e-10:
-            square[i] = amp
-        elif val < -1e-10:
-            square[i] = -amp
-        else:
-            square[i] = 0
-    return timevector, square
-
-def sinewave(timevector = np.linspace(0,1,500), amp =1 , freq = 5,  phase = 0):
-    sinewave = amp*np.sin(2*np.pi*freq*timevector+phase)
-    return timevector, sinewave
-
-def addnoise(signal1, noise_amp):
-    return signal1 + np.random.normal(scale = noise_amp, size = len(signal1))
-
-
+@nb.jit()
 def dtw_average(signals, average_signal, iterations, window_size):
     nsignals = len(signals)
     paths = []
@@ -87,6 +67,7 @@ def dtw_average(signals, average_signal, iterations, window_size):
 
     return time_index, average_signal
 
+@nb.jit()
 def warped_signal(path, warp_index, signal1):
 
     """the path array is an array of tuples of length 2 pairing indices from the two signals
@@ -121,7 +102,7 @@ def warped_signal(path, warp_index, signal1):
 
     return unique_time_index, warped_signal
 
-
+@nb.jit()
 def purity_score(nclusters, data_labels, clusters):
     in_cluster_count= {}
     correspondence = {}
@@ -141,48 +122,7 @@ def purity_score(nclusters, data_labels, clusters):
 
     return correspondence, purity
 
-def generate_data(sr = 300, signal_length = 1, nsignals = 15, noise = .15,
-                 freq_range = [2,7]):
-    #sr is sampling rate, signal length in seconds, nsignals number of signals to generate
-    #noise is a noise coefficient as a proportion of event amplitude
-    time = np.linspace(1/sr,signal_length, sr*signal_length) #time vector
-    npnts = signal_length*sr #number of points in signal
-    data = np.zeros((nsignals, npnts)) #initialize data matrix
-    data_labels = np.zeros(nsignals) #initialize label matrix
-
-    for n in range(nsignals):
-        signal_type = np.random.choice([1,2,3], size = 1)[0] #randomly select event type
-
-        data_labels[n] =signal_type # save event type to data_label matrix
-
-        freq = np.random.choice(list(range(freq_range[0],freq_range[1]+1))) #randomly select event frequency
-        amp = np.random.choice([1,2,3]) #randomly select event amplitude
-
-        #create event based on random selections
-        if signal_type == 1:
-            event = sinewave(timevector = np.linspace(0, 1/freq, int(sr/freq)), freq = freq, amp = amp)[1]
-
-        elif signal_type == 2:
-
-            event = amp*signal.sawtooth( t = 2*np.pi*freq*np.linspace(0, 1/freq, int(sr/freq)), width=1)
-        else:
-            event = squarewave(timevector = np.linspace(0, 1/freq, int(sr/freq)), freq = freq, amp = amp)[1]
-
-
-        #randomly embed event in signal
-        start_point = np.random.randint(0, npnts-len(event), size = 1)[0]
-
-        signal1 = np.zeros(npnts)
-
-        signal1[start_point: start_point + int(sr/freq)] = event
-
-        #add background noise
-        signal1 = addnoise(signal1, noise*amp)
-
-        #save signal to data matrix
-        data[n, :] = signal1
-    return time, data, data_labels
-
+@nb.jit()
 def tkeo_operator(data, k = 1):
 
     npnts = len(data[0])
@@ -193,6 +133,7 @@ def tkeo_operator(data, k = 1):
             filt_data[i][n] = data[i][n]**2-data[i][n-1]*data[i][n+1]
     return filt_data
 
+@nb.jit()
 def standard_scaler(data):
     nsignals = len(data)
     for i in range(nsignals):
@@ -202,30 +143,31 @@ def standard_scaler(data):
     return data
 
 
+@nb.jit()
 def dtw_distance_matrix(data, window_size, indices):
     nsignals = len(data)
-    dtw_dists = np.zeros([nsignals,nsignals])
+    dtw_dists = [[] for _ in range(nsignals)]
     for i in range(nsignals):
 
         signal1 = data[i][indices[i][0]:indices[i][1]]
         for j in range(nsignals):
             signal2 = data[j][indices[j][0]:indices[j][1]]
 
-            if i == j:
-                dtw_dists[i,j] = 0
-
-            if dtw_dists[i,j] == 0:
+            if i <= j:
                 cost_matrix, path, distance = pruned_dtw(signal1, signal2, window_size)
 
-                dtw_dists[i,j] = distance
-                dtw_dists[j,i] = distance
+                dtw_dists[i].append(distance)
 
+    for i in range(nsignals):
+        dtw_dists[i].extend([dtw_dists[j][i] for j in range(i+1, nsignals)])
+    dtw_dists = np.array(dtw_dists)
     return dtw_dists
 
+@nb.jit()
 def dtw_correlation(data, window_size, indices):
     nsignals = len(data)
-    dtw_corrs = np.zeros([nsignals,nsignals])
-    for i in tqdm(range(nsignals)):
+    dtw_corrs = np.zeros((nsignals,nsignals))
+    for i in range(nsignals):
 
         signal1 = data[i][indices[i][0]:indices[i][1]]
         for j in range(nsignals):
@@ -251,6 +193,7 @@ def dtw_correlation(data, window_size, indices):
 
     return dtw_corrs
 
+@nb.jit()
 def pruned_dtw(matched, warped, window_size):
     #create distance matrix
     N = len(matched)
@@ -263,7 +206,7 @@ def pruned_dtw(matched, warped, window_size):
     end_column = 1
 
     #window must be greater than N-M
-    window_size = np.max([window_size, N-M])
+    window_size = max(window_size, N-M)
 
     #create cost matrix
     cost_matrix = np.ndarray((N+1, M+1))
@@ -288,8 +231,8 @@ def pruned_dtw(matched, warped, window_size):
             ub_col_index = int(np.floor(i/fraction))
 
 
-        beg = np.max([start_column,ub_col_index-window_size])
-        end = np.min([M+1, ub_col_index+window_size+1])
+        beg = max(start_column,ub_col_index-window_size)
+        end = min(M+1, ub_col_index+window_size+1)
         smaller_found = False
         end_column_next = ub_col_index
 
@@ -336,7 +279,7 @@ def pruned_dtw(matched, warped, window_size):
         if tb_type == 0:
             #match
             i = i-1
-            j= j-1
+            j = j-1
 
         elif tb_type == 1:
             #insertion
@@ -356,6 +299,7 @@ def pruned_dtw(matched, warped, window_size):
 
     return cost_matrix, path, distance
 
+@nb.jit()
 def upper_bound_partials(signal1, signal2):
     signal_list = [signal1, signal2]
     coordinate_list = [[],[]]
@@ -386,18 +330,20 @@ def upper_bound_partials(signal1, signal2):
     coordinate_list = zip(coordinate_list[0],coordinate_list[1])
     return list(coordinate_list), fraction, ub_partials
 
+@nb.jit()
 def rolling_std(signal1, k):
     n = len(signal1)
     window_size = 2*k+1
     std_ts = np.zeros(n)
     for ti in range(n):
-        low_bnd = np.max([0, ti-k])
-        up_bnd = np.min([n,ti+k])
+        low_bnd = max(0, ti-k)
+        up_bnd = min(n,ti+k)
         tmp_sig = signal1[low_bnd:up_bnd]
         std_ts[ti] = np.std(tmp_sig)
 
     return std_ts
 
+@nb.jit()
 def segment_indices(signal1, thresh =.9, k = 10, pad = 10):
     halfwin = k
     std_ts = rolling_std(signal1, halfwin)
@@ -407,11 +353,12 @@ def segment_indices(signal1, thresh =.9, k = 10, pad = 10):
     indices[1] = min([indices[1]+pad, n])
     return indices
 
+@nb.jit()
 def segment_data(data, thresh = .9, k =10, pad = 10):
     nsignals = len(data)
-    indices = np.zeros([nsignals,2],dtype = int)
+    indices = np.zeros((nsignals,2),dtype = int)
     segmented_data = []
-    for i in tqdm(range(nsignals)):
+    for i in range(nsignals):
         ind = segment_indices(data[i], thresh = thresh, k = k, pad = pad)
         #segmented_data.append(data[i][indices[0]:indices[1]])
         indices[i] = ind
@@ -440,8 +387,9 @@ def tsne_visualization(dtw_dists, centroids, data_labels):
 
     plt.title('TSNE of DTW correlation matrix')
     plt.legend()
-    plt.show()
+    # plt.show()
 
+@nb.jit()
 def representative_signal_indexes(clusters, dtw_dists):
     #find optimal ingroup representative of cluster
     unique_cluster_labels = np.unique(clusters)
@@ -484,6 +432,7 @@ def preprocessing(data, thresh = 10, k = 10, pad = 10):
 
     return indxs, filt_data
 
+@nb.jit()
 def average_incluster_signals(filt_data, indxs, clusters, dtw_dists):
     cluster_indxs_list, best_signals_indxs = representative_signal_indexes(clusters, dtw_dists)
     iterations = 10
@@ -502,6 +451,7 @@ def average_incluster_signals(filt_data, indxs, clusters, dtw_dists):
         time_index_list.append(time_index)
     return time_index_list, average_signal_list
 
+@nb.jit()
 def predict_test_data(test_filt_data, test_indxs,average_signal_list, window_size):
     nsignals = len(test_filt_data)
     nclasses = len(average_signal_list)
@@ -522,12 +472,12 @@ def predict_test_data(test_filt_data, test_indxs,average_signal_list, window_siz
         predicted_labels[i] = predicted_label
     return predicted_labels
 
-def load_data(filename, nsignals=8, down_sampling=10):
+def load_data(filename, nsignals=8, down_sampling=None, short=200):
     import pandas as pd
 
     df = pd.read_csv(filename, sep="\t", header=None)
-    data_labels = df.loc[:,0].to_numpy()
-    data = df.loc[:,1:].to_numpy()
+    data_labels = df.loc[:,0].to_numpy(dtype=np.int32)
+    data = df.loc[:,1:].to_numpy(dtype=np.float32)
 
     if isinstance(down_sampling, int):
         new_data = []
@@ -537,10 +487,13 @@ def load_data(filename, nsignals=8, down_sampling=10):
             x = np.sum(data[:, i*down_sampling:(i+1)*down_sampling], axis=1, keepdims=True) / down_sampling
             print(x.shape)
             new_data.append(x)
-        new_data = np.concatenate(new_data, axis=1)
+        new_data = np.concatenate(new_data, axis=1, dtype=np.float32)
         # print(new_data)
         data = new_data
         print(data[0,:])
+
+    if isinstance(short, int):
+        data = data[:, :short]
 
     time = np.linspace(0,1,data.shape[1])
     print(data.shape, data_labels.shape, time.shape)
@@ -548,12 +501,14 @@ def load_data(filename, nsignals=8, down_sampling=10):
 
 
 # time, data, data_labels = generate_data(nsignals = 30)
-time, data, data_labels = load_data("train_data.tsv")
+# d = input("down_sampling") or None
+d = None
+time, data, data_labels = load_data("train_data.tsv", down_sampling=d)
 
 nsignals = len(data)
 for n in range(nsignals):
     plt.plot(time, data[n,:]+5*n)
-plt.show()
+# plt.show()
 
 
 # #standard scaler
@@ -567,14 +522,14 @@ filt_data = standard_scaler(filt_data)
 
 for n in range(nsignals):
     plt.plot(time, filt_data[n,:]+10*n)
-plt.show()
+# plt.show()
 
 
 indxs = segment_data(filt_data, pad = 10, thresh = 1, k=10)
 
 for i in range(nsignals):
     plt.plot(time[indxs[i][0]:indxs[i][1]],filt_data[i][indxs[i][0]:indxs[i][1]]+10*i)
-plt.show()
+# plt.show()
 
 
 dtw_dists = dtw_correlation(data = filt_data, window_size = 30, indices = indxs)
