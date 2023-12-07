@@ -6,7 +6,6 @@ from sklearn.cluster import KMeans
 from scipy import signal
 import numba as nb
 
-@nb.jit()
 def dtw_average(signals, average_signal, iterations, window_size):
     nsignals = len(signals)
     paths = []
@@ -67,7 +66,6 @@ def dtw_average(signals, average_signal, iterations, window_size):
 
     return time_index, average_signal
 
-@nb.jit()
 def warped_signal(path, warp_index, signal1):
 
     """the path array is an array of tuples of length 2 pairing indices from the two signals
@@ -102,7 +100,6 @@ def warped_signal(path, warp_index, signal1):
 
     return unique_time_index, warped_signal
 
-@nb.jit()
 def purity_score(nclusters, data_labels, clusters):
     in_cluster_count= {}
     correspondence = {}
@@ -122,7 +119,6 @@ def purity_score(nclusters, data_labels, clusters):
 
     return correspondence, purity
 
-@nb.jit()
 def tkeo_operator(data, k = 1):
 
     npnts = len(data[0])
@@ -133,7 +129,6 @@ def tkeo_operator(data, k = 1):
             filt_data[i][n] = data[i][n]**2-data[i][n-1]*data[i][n+1]
     return filt_data
 
-@nb.jit()
 def standard_scaler(data):
     nsignals = len(data)
     for i in range(nsignals):
@@ -143,7 +138,6 @@ def standard_scaler(data):
     return data
 
 
-@nb.jit()
 def dtw_distance_matrix(data, window_size, indices):
     nsignals = len(data)
     dtw_dists = [[] for _ in range(nsignals)]
@@ -163,7 +157,6 @@ def dtw_distance_matrix(data, window_size, indices):
     dtw_dists = np.array(dtw_dists)
     return dtw_dists
 
-@nb.jit()
 def dtw_correlation(data, window_size, indices):
     nsignals = len(data)
     dtw_corrs = np.zeros((nsignals,nsignals))
@@ -193,7 +186,6 @@ def dtw_correlation(data, window_size, indices):
 
     return dtw_corrs
 
-@nb.jit()
 def pruned_dtw(matched, warped, window_size):
     #create distance matrix
     N = len(matched)
@@ -299,7 +291,6 @@ def pruned_dtw(matched, warped, window_size):
 
     return cost_matrix, path, distance
 
-@nb.jit()
 def upper_bound_partials(signal1, signal2):
     signal_list = [signal1, signal2]
     coordinate_list = [[],[]]
@@ -330,7 +321,6 @@ def upper_bound_partials(signal1, signal2):
     coordinate_list = zip(coordinate_list[0],coordinate_list[1])
     return list(coordinate_list), fraction, ub_partials
 
-@nb.jit()
 def rolling_std(signal1, k):
     n = len(signal1)
     window_size = 2*k+1
@@ -343,8 +333,7 @@ def rolling_std(signal1, k):
 
     return std_ts
 
-@nb.jit()
-def segment_indices(signal1, thresh =.9, k = 10, pad = 10):
+def segment_indices(signal1, thresh, k, pad):
     halfwin = k
     std_ts = rolling_std(signal1, halfwin)
     n = len(signal1)
@@ -353,8 +342,7 @@ def segment_indices(signal1, thresh =.9, k = 10, pad = 10):
     indices[1] = min([indices[1]+pad, n])
     return indices
 
-@nb.jit()
-def segment_data(data, thresh = .9, k =10, pad = 10):
+def segment_data(data, thresh, k, pad):
     nsignals = len(data)
     indices = np.zeros((nsignals,2),dtype = int)
     segmented_data = []
@@ -389,7 +377,6 @@ def tsne_visualization(dtw_dists, centroids, data_labels):
     plt.legend()
     # plt.show()
 
-@nb.jit()
 def representative_signal_indexes(clusters, dtw_dists):
     #find optimal ingroup representative of cluster
     unique_cluster_labels = np.unique(clusters)
@@ -423,8 +410,9 @@ def preprocessing(data, thresh = 10, k = 10, pad = 10):
 
     #standard scaler
     filt_data = standard_scaler(filt_data)
+    print(filt_data)
 
-    thresh = 1
+    thresh = 0.9
     k=10
     pad = 10
 
@@ -432,7 +420,6 @@ def preprocessing(data, thresh = 10, k = 10, pad = 10):
 
     return indxs, filt_data
 
-@nb.jit()
 def average_incluster_signals(filt_data, indxs, clusters, dtw_dists):
     cluster_indxs_list, best_signals_indxs = representative_signal_indexes(clusters, dtw_dists)
     iterations = 10
@@ -451,7 +438,6 @@ def average_incluster_signals(filt_data, indxs, clusters, dtw_dists):
         time_index_list.append(time_index)
     return time_index_list, average_signal_list
 
-@nb.jit()
 def predict_test_data(test_filt_data, test_indxs,average_signal_list, window_size):
     nsignals = len(test_filt_data)
     nclasses = len(average_signal_list)
@@ -472,7 +458,7 @@ def predict_test_data(test_filt_data, test_indxs,average_signal_list, window_siz
         predicted_labels[i] = predicted_label
     return predicted_labels
 
-def load_data(filename, nsignals=8, down_sampling=None, short=200):
+def load_data(filename, nsignals=8, down_sampling=None, short=None):
     import pandas as pd
 
     df = pd.read_csv(filename, sep="\t", header=None)
@@ -525,7 +511,7 @@ for n in range(nsignals):
 # plt.show()
 
 
-indxs = segment_data(filt_data, pad = 10, thresh = 1, k=10)
+indxs = segment_data(filt_data, pad = 10, thresh = 0.99, k=10)
 
 for i in range(nsignals):
     plt.plot(time[indxs[i][0]:indxs[i][1]],filt_data[i][indxs[i][0]:indxs[i][1]]+10*i)
